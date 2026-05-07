@@ -1,0 +1,147 @@
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${SECRET_KEY}
+    PYTHONPATH: /opt/airflow/src
+    # MinIO
+    MINIO_ENDPOINT: minio:9000
+    MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+    MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+    MINIO_BUCKET_BRONZE: bronze
+    MINIO_BUCKET_SILVER: silver
+    MINIO_BUCKET_GOLD: gold
+    MINIO_BUCKET_QUARANTINE: quarantine
+    # Adzuna
+    ADZUNA_APP_ID: ${ADZUNA_APP_ID}
+    ADZUNA_APP_KEY: ${ADZUNA_APP_KEY}
+    # Database
+    DATABASE_URL: postgresql://airflow:airflow@postgres:5432/airflow
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./src:/opt/airflow/src
+    - ./data:/opt/airflow/data
+  depends_on:
+    postgres:
+      condition: service_healthy
+    minio:
+      condition: service_healthy
+  networks:
+    - data-platform
+
+services:
+
+  # ── MinIO (AWS S3 compatible) ──────────────────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    ports:
+      - "9000:9000"   # API
+      - "9001:9001"   # Console Web
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    command: server /data --console-address ":9001"
+    volumes:
+      - ./data/minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - data-platform
+
+  # ── PostgreSQL ─────────────────────────────────────────────
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+    networks:
+      - data-platform
+
+  # ── Airflow init (roda uma vez e encerra) ──────────────────
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow_init
+    command: bash -c "airflow db init && (airflow users create --username airflow --password airflow --firstname Air --lastname Flow --role Admin --email admin@example.com || true)"
+    restart: "no"
+
+  # ── Airflow Webserver ──────────────────────────────────────
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow_webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Airflow Scheduler ──────────────────────────────────────
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow_scheduler
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ── Prometheus ─────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - data-platform
+    restart: unless-stopped
+
+  # ── Grafana ────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning
+      - grafana-storage:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - data-platform
+    restart: unless-stopped
+
+networks:
+  data-platform:
+    driver: bridge
+
+volumes:
+  grafana-storage:
