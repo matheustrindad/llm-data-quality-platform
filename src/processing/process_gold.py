@@ -64,13 +64,12 @@ def build_spark() -> SparkSession:
 def agg_metrics_by_source(df: DataFrame) -> DataFrame:
     """
     Aggregation 1 — metrics_by_source.
-    Answers: "How many jobs per source, per country, per day?
-              What's the average salary? How many are remote?"
-
-    This is the primary table consumed by the NestJS API /metrics endpoint.
+    Uses ingested_at (truncated to date) as the time dimension
+    since posted_date is not available in the Silver schema.
     """
     return (
-        df.groupBy("_source", "country", "posted_date")
+        df.withColumn("ingestion_date", F.to_date(F.col("ingested_at")))
+        .groupBy("_source", "country", "ingestion_date")
         .agg(
             F.count("*").alias("job_count"),
             F.countDistinct("company").alias("company_count"),
@@ -78,13 +77,12 @@ def agg_metrics_by_source(df: DataFrame) -> DataFrame:
             F.round(F.avg("salary_max"), 2).alias("avg_salary_max"),
             F.round(F.stddev("salary_min"), 2).alias("stddev_salary"),
             F.sum(F.col("is_remote").cast("int")).alias("remote_count"),
-            # Remote rate — useful for trend analysis
             F.round(
                 F.sum(F.col("is_remote").cast("int")) / F.count("*") * 100, 1
             ).alias("remote_pct"),
         )
         .withColumnRenamed("_source", "source")
-        .orderBy("posted_date", "country", "source")
+        .orderBy("ingestion_date", "country", "source")
     )
 
 
