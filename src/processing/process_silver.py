@@ -59,7 +59,8 @@ def build_spark() -> SparkSession:
         .config("spark.hadoop.fs.s3a.secret.key",        MINIO_SECRET_KEY)
         .config("spark.hadoop.fs.s3a.path.style.access", "true")
         .config("spark.hadoop.fs.s3a.impl",              "org.apache.hadoop.fs.s3a.S3AFileSystem")
-        # Required JARs — must be present in SPARK_HOME/jars or added via packages
+        .config("spark.hadoop.fs.s3a.connection.timeout", "300000")
+        .config("spark.hadoop.fs.s3a.socket.timeout",     "300000")
         .config("spark.jars.packages",
                 "org.apache.hadoop:hadoop-aws:3.3.4,"
                 "com.amazonaws:aws-java-sdk-bundle:1.12.262")
@@ -132,10 +133,35 @@ def deduplicate(df: DataFrame) -> DataFrame:
     )
 
 
+def ensure_buckets() -> None:
+    """Create Silver and Quarantine buckets if they don't exist."""
+    import boto3
+    from botocore.exceptions import ClientError
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=f"http://{MINIO_ENDPOINT}",
+        aws_access_key_id=MINIO_ACCESS_KEY,
+        aws_secret_access_key=MINIO_SECRET_KEY,
+        region_name="us-east-1",
+    )
+    for bucket in [SILVER_BUCKET, QUARANTINE_BUCKET]:
+        try:
+            s3.head_bucket(Bucket=bucket)
+        except ClientError as e:
+            if e.response["Error"]["Code"] in ("404", "NoSuchBucket"):
+                s3.create_bucket(Bucket=bucket)
+                log.info("Bucket created: %s", bucket)
+            else:
+                raise
+
+
 def run(run_date: str = None) -> dict:
     """Entry point — called by Airflow DAG or directly."""
     if not run_date:
         run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # Ensure destination buckets exist before Spark tries to write
+    ensure_buckets()
 
     spark = build_spark()
     spark.sparkContext.setLogLevel("WARN")

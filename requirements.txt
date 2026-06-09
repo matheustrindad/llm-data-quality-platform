@@ -5,3 +5,5 @@ python-dotenv
 psycopg2-binary
 pandas
 prometheus-client
+pyspark==3.5.1
+pyarrow

@@ -50,6 +50,8 @@ def build_spark() -> SparkSession:
         .config("spark.hadoop.fs.s3a.secret.key",        MINIO_SECRET_KEY)
         .config("spark.hadoop.fs.s3a.path.style.access", "true")
         .config("spark.hadoop.fs.s3a.impl",              "org.apache.hadoop.fs.s3a.S3AFileSystem")
+        .config("spark.hadoop.fs.s3a.connection.timeout", "300000")
+        .config("spark.hadoop.fs.s3a.socket.timeout",     "300000")
         .config("spark.jars.packages",
                 "org.apache.hadoop:hadoop-aws:3.3.4,"
                 "com.amazonaws:aws-java-sdk-bundle:1.12.262")
@@ -153,10 +155,33 @@ def agg_quality_summary(df: DataFrame) -> DataFrame:
     )
 
 
+def ensure_buckets() -> None:
+    """Create Gold bucket if it doesn't exist."""
+    import boto3
+    from botocore.exceptions import ClientError
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=f"http://{MINIO_ENDPOINT}",
+        aws_access_key_id=MINIO_ACCESS_KEY,
+        aws_secret_access_key=MINIO_SECRET_KEY,
+        region_name="us-east-1",
+    )
+    try:
+        s3.head_bucket(Bucket=GOLD_BUCKET)
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("404", "NoSuchBucket"):
+            s3.create_bucket(Bucket=GOLD_BUCKET)
+            log.info("Bucket created: %s", GOLD_BUCKET)
+        else:
+            raise
+
+
 def run(run_date: str = None) -> dict:
     """Entry point — called by Airflow processing_dag or directly."""
     if not run_date:
         run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    ensure_buckets()
 
     spark = build_spark()
     spark.sparkContext.setLogLevel("WARN")
